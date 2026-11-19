@@ -43,3 +43,11 @@ include(GoogleTest)
 add_executable(ref_tests tests/reference_book_test.cpp)
 target_link_libraries(ref_tests PRIVATE lob_ref GTest::gtest_main)
 gtest_discover_tests(ref_tests)
+
+add_executable(pool_tests tests/order_pool_test.cpp)
+target_link_libraries(pool_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(pool_tests)
+
+add_executable(idmap_tests tests/id_map_test.cpp)
+target_link_libraries(idmap_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(idmap_tests)
