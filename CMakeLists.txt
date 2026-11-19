@@ -51,3 +51,7 @@ gtest_discover_tests(pool_tests)
 add_executable(idmap_tests tests/id_map_test.cpp)
 target_link_libraries(idmap_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
 gtest_discover_tests(idmap_tests)
+
+add_executable(price_bitmap_tests tests/price_bitmap_test.cpp)
+target_link_libraries(price_bitmap_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(price_bitmap_tests)
