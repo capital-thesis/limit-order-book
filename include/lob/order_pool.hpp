@@ -21,6 +21,7 @@ struct PoolOrder {
   PoolIndex next = kNullIndex;
   PoolIndex prev = kNullIndex;
   bool live = false;
+  bool buy = false;
 };
 
 // Preallocated slab with an intrusive free list. All storage is allocated in

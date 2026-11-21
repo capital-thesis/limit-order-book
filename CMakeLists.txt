@@ -55,3 +55,11 @@ gtest_discover_tests(idmap_tests)
 add_executable(price_bitmap_tests tests/price_bitmap_test.cpp)
 target_link_libraries(price_bitmap_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
 gtest_discover_tests(price_bitmap_tests)
+
+add_executable(price_levels_tests tests/price_levels_test.cpp)
+target_link_libraries(price_levels_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(price_levels_tests)
+
+add_executable(book_add_cancel_tests tests/book_add_cancel_test.cpp)
+target_link_libraries(book_add_cancel_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(book_add_cancel_tests)
