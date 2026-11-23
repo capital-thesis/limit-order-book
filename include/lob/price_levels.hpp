@@ -84,6 +84,10 @@ public:
     Price max_price() const noexcept { return max_; }
     bool occupied(Price p) const noexcept { return bitmap_.test(slot_of(p)); }
     
+    // Called when a resting order fills `amount` and stays in its level.
+    // Keeps the level total equal to the sum of leaves.
+    void consume(Price p, Qty amount) noexcept { level(p).total -= amount; }
+
     std::optional<Price> best() const {
       const std::size_t s =
           best_is_high_ ? bitmap_.find_last() : bitmap_.find_first();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <optional>
@@ -21,9 +22,8 @@ struct FastTotals {
   Qty rejected = 0;
 };
 
-// Fast book, step 1: resting limit orders only. add() rests an order without
-// matching, so the caller must not send an order that crosses the opposite best.
-// Matching arrives in phase 4. Capacity must cover the peak number of resting orders.
+// Fast book. submit() handles market, IOC and GTC limit orders. FOK arrives in S4.3.
+// Matching arrives in phase 5. Capacity must cover the peak number of resting orders.
 class FastBook {
 public:
   FastBook(Price min_price, Price max_price, std::uint32_t capacity)
@@ -32,43 +32,44 @@ public:
         bids_(min_price, max_price, true),
         asks_(min_price, max_price, false) {}
 
-  // Returns the id. Every call consumes one id, including rejected calls.
+  // Every call consumes one id, including rejected calls.
   template <class Sink>
-  OrderId add(const NewOrder& o, Sink& sink) {
+  OrderId submit(const NewOrder& o, Sink& sink) {
     const OrderId id = next_id_++;
     if (o.qty <= 0) {
       sink(ev::rejected(id, RejectReason::InvalidQty));
       return id;
     }
-    if (!bids_.in_band(o.price)) {
-      totals_.submitted += o.qty;
-      totals_.rejected += o.qty;
-      sink(ev::rejected(id, RejectReason::OutOfBand));
+    const bool market = o.type == OrderType::Market;
+    if (!market && !bids_.in_band(o.price)) {
+      reject_counted(id, o.qty, RejectReason::OutOfBand, sink);
       return id;
     }
     const bool buy = o.side == Side::Buy;
-    assert(!crosses(buy, o.price) && "add() does not match; the order would cross");
+    if (market && !opposite(buy).best().has_value()) {
+      reject_counted(id, o.qty, RejectReason::NoLiquidity, sink);
+      return id;
+    }
+    assert(o.tif != Tif::Fok && "FOK arrives in S4.3");
 
     totals_.submitted += o.qty;
     sink(ev::accepted(id));
-
-    const PoolIndex i = pool_.alloc();
-    assert(i != kNullIndex && "order pool is full");
-    PoolOrder& p = pool_[i];
-    p.id = id;
-    p.price = o.price;
-    p.total = o.qty;
-    p.filled = 0;
-    p.buy = buy;
-    p.seq = next_seq_++;
-    const bool inserted = index_.insert(id, i);
-    assert(inserted);
-    (void)inserted;
-
-    side(buy).push_back(pool_, o.price, i);
-    resting_ += o.qty;
-    sink(ev::rested(id, o.price, o.qty));
+    const Qty left = match(buy, market, o.price, id, o.qty, sink);
+    if (left == 0) {
+      sink(ev::filled(id));
+    } else if (market || o.tif == Tif::Ioc) {
+      totals_.cancelled += left;
+      sink(ev::cancelled(id, CancelReason::IocRemainder, left));
+    } else {
+      place(id, buy, o.price, o.qty, o.qty - left, sink);
+    }
     return id;
+  }
+
+  // Phase 3 name, kept so the add/cancel tests and the differential stream atill compile.
+  template <class Sink>
+  OrderId add(const NewOrder& o, Sink& sink) {
+    return submit(o, sink);
   }
 
   template <class Sink>
@@ -117,15 +118,69 @@ public:
   }  
 
 private:
-  PriceLevels& side(bool buy) { return buy ? bids_ : asks_;}
+  PriceLevels& side(bool buy) { return buy ? bids_ : asks_; }
+  PriceLevels& opposite(bool buy) { return buy ? asks_ : bids_; }
+  
+  template <class Sink>
+  void reject_counted(OrderId id, Qty qty, RejectReason r, Sink& sink) {
+    totals_.submitted += qty;
+    totals_.rejected += qty;
+    sink(ev::rejected(id, r));
+  }
 
-  bool crosses(bool buy, Price p) const {
-    if (buy) {
-      const std::optional<Price> a = asks_.best();
-      return a && p >= *a;
+  // Walks the opposite side best-first while levels cross. Each trade prints at the
+  // maker's price, and a maker's Filled follows its own Trade at once.
+  // Returns the quantity left untraded.
+  template <class Sink>
+  Qty match(bool buy, bool market, Price limit, OrderId taker, Qty leaves, Sink& sink) {
+    PriceLevels& opp = opposite(buy);
+    while (leaves > 0) {
+      const std::optional<Price> best = opp.best();
+      if (!best) break;
+      const Price p = *best;
+      if (!market && (buy ? p > limit : p < limit)) break;
+      Level& lv = opp.level(p);
+      while (leaves > 0 && lv.head != kNullIndex) {
+        const PoolIndex mi = lv.head;
+        PoolOrder& m = pool_[mi];
+        const Qty fill = std::min(leaves, m.total - m.filled);
+        m.filled += fill;
+        opp.consume(p, fill);
+        leaves -= fill;
+        resting_ -= fill;
+        totals_.traded += fill;
+        sink(ev::trade(m.id, taker, p, fill));
+        if (m.filled == m.total) {
+          const OrderId mid = m.id;
+          opp.unlink(pool_, p, mi);
+          index_.erase(mid);
+          pool_.release(mi);
+          sink(ev::filled(mid));
+        }
+      }
     }
-    const std::optional<Price> b = bids_.best();
-    return b && p <= *b;
+    return leaves;
+  }
+
+  // Allocates a slot, indexes it, appends it to its level, and emits Rested.
+  template <class Sink>
+  void place(OrderId id, bool buy, Price price, Qty total, Qty filled, Sink& sink) {
+    const PoolIndex i = pool_.alloc();
+    assert(i != kNullIndex && "order pool is full");
+    PoolOrder& p = pool_[i];
+    p.id = id;
+    p.price = price;
+    p.total = total;
+    p.filled = filled;
+    p.buy = buy;
+    p.seq = next_seq_++;
+    const bool inserted = index_.insert(id, i);
+    assert(inserted);
+    (void)inserted;
+    side(buy).push_back(pool_, price, i);
+    const Qty leaves = total - filled;
+    resting_ += leaves;
+    sink(ev::rested(id, price, leaves));
   }
 
   static void require(bool ok, const char* what) {

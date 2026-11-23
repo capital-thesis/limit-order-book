@@ -71,3 +71,7 @@ gtest_discover_tests(differential_tests)
 add_executable(invariant_tests tests/invariants_test.cpp)
 target_link_libraries(invariant_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
 gtest_discover_tests(invariant_tests)
+
+add_executable(book_match_tests tests/book_match_test.cpp)
+target_link_libraries(book_match_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(book_match_tests)
