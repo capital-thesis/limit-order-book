@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 
 #include "lob/id_map.hpp"
 #include "lob/order_pool.hpp"
@@ -96,6 +97,25 @@ public:
   std::size_t order_count() const { return index_.size(); }
   const FastTotals& totals() const { return totals_; }
 
+  // Full scan of both sides against the cached state. Throws std::logic_error on
+  // the first violation. Call between operations only.
+  void check_invariants() const {
+    std::size_t count = 0;
+    Qty resting = 0;
+    std::optional<Price> bid_scan;
+    std::optional<Price> ask_scan;
+    check_side(bids_, true, count, resting, bid_scan);
+    check_side(asks_, false, count, resting, ask_scan);
+    require(bid_scan == best_bid(), "best bid differs from full scan");
+    require(ask_scan == best_ask(), "best ask differs from full scan");
+    require(!(bid_scan && ask_scan && *bid_scan >= *ask_scan), "crossed book at rest");
+    require(count == index_.size(), "index size differs from book size");
+    require(resting == resting_, "resting counter differs from scan");
+    require(totals_.submitted + totals_.increased - totals_.reduced ==
+                2 * totals_.traded + resting + totals_.cancelled + totals_.rejected,
+            "global conservation identity");
+  }  
+
 private:
   PriceLevels& side(bool buy) { return buy ? bids_ : asks_;}
 
@@ -106,6 +126,48 @@ private:
     }
     const std::optional<Price> b = bids_.best();
     return b && p <= *b;
+  }
+
+  static void require(bool ok, const char* what) {
+    if (!ok) throw std::logic_error(what);
+  }
+
+  void check_side(const PriceLevels& side, bool buy, std::size_t& count,
+                  Qty& resting, std::optional<Price>& scan_best) const {
+    for (Price p = side.min_price(); p <= side.max_price(); ++p) {
+      const Level& lv = side.level(p);
+      if (lv.count == 0) {
+        require(!side.occupied(p), "bitmap marks an empty level");
+        require(lv.head == kNullIndex && lv.tail == kNullIndex && lv.total == 0,
+                "empty level has residue");
+        continue;
+      }
+      require(side.occupied(p), "non-empty level not marked in bitmap");
+      if (buy || !scan_best) scan_best = p;  // ascending scan: last hit is highest
+
+      Qty level_sum = 0;
+      std::uint32_t n = 0;
+      PoolIndex prev = kNullIndex;
+      for (PoolIndex i = lv.head; i != kNullIndex; i = pool_[i].next) {
+        require(n < pool_.capacity(), "cycle in level list");
+        require(pool_.is_live(i), "level list reaches a free slot");
+        const PoolOrder& o = pool_[i];
+        require(o.prev == prev, "broken prev link");
+        require(o.buy == buy && o.price == p, "order stored under wrong side or level");
+        const Qty leaves = o.total - o.filled;
+        require(leaves > 0, "non-positive leaves in book");
+        const IdMap::Value* found = index_.find(o.id);
+        require(found != nullptr && *found == i, "index does not point at this order");
+        level_sum += leaves;
+        resting += leaves;
+        ++n;
+        ++count;
+        prev = i;
+      }
+      require(lv.tail == prev, "tail does not match last node");
+      require(lv.count == n, "level count differs from list length");
+      require(lv.total == level_sum, "level total differs from sum of leaves");
+    }
   }
 
   OrderPool pool_;

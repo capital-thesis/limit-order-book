@@ -79,7 +79,11 @@ public:
       --lv.count;
       if (lv.count == 0) bitmap_.clear(slot_of(p));
     }
-
+    
+    Price min_price() const noexcept { return min_; }
+    Price max_price() const noexcept { return max_; }
+    bool occupied(Price p) const noexcept { return bitmap_.test(slot_of(p)); }
+    
     std::optional<Price> best() const {
       const std::size_t s =
           best_is_high_ ? bitmap_.find_last() : bitmap_.find_first();

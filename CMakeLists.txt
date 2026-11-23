@@ -63,3 +63,11 @@ gtest_discover_tests(price_levels_tests)
 add_executable(book_add_cancel_tests tests/book_add_cancel_test.cpp)
 target_link_libraries(book_add_cancel_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
 gtest_discover_tests(book_add_cancel_tests)
+
+add_executable(differential_tests tests/differential_test.cpp)
+target_link_libraries(differential_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(differential_tests)
+
+add_executable(invariant_tests tests/invariants_test.cpp)
+target_link_libraries(invariant_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(invariant_tests)
