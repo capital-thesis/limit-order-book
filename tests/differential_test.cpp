@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <random>
 #include <sstream>
 #include <string>
@@ -28,14 +29,32 @@ struct Op {
   lob::OrderId target = 0;
 };
 
+// add-only: GTC limits, buys below mid and sells above, so nothing crosses.
+// full: market, IOC, FOK and GTC limits, near-touch and whole-band prices, so trades happen.
+enum class Mix { AddOnly, Full };
+
+lob::Tif pick_tif(std::mt19937& rng) {
+  const unsigned r = rng() % 100;
+  if (r < 70) return lob::Tif::Gtc;
+  if (r < 85) return lob::Tif::Ioc;
+  return lob::Tif::Fok;
+}
+
+lob::Price pick_price(std::mt19937& rng, Mix mix, lob::Side side) {
+  if (mix == Mix::AddOnly) {
+    return side == lob::Side::Buy ? kMid - 1 - static_cast<lob::Price>(rng() % 10)
+                                  : kMid + 1 + static_cast<lob::Price>(rng() % 10);
+  }
+  if (rng() % 2 == 0) return kMid - 4 + static_cast<lob::Price>(rng() % 9);  // near touch
+  return kMin + static_cast<lob::Price>(rng() % (kMax - kMin + 1));          // whole band
+}
+
 // Ids are predictable: every add consumes one, so the generator tracks `issued`.
-Op next_op(std::mt19937& rng, lob::OrderId issued) {
+Op next_op(std::mt19937& rng, lob::OrderId issued, Mix mix) {
   Op op;
   if (rng() % 100 < 65) {
     op.is_add = true;
     op.order.side = rng() % 2 == 0 ? lob::Side::Buy : lob::Side::Sell;
-    op.order.type = lob::OrderType::Limit;
-    op.order.tif = lob::Tif::Gtc;
     const unsigned roll = rng() % 100;
     if (roll < 1) {
       op.order.qty = 0;
@@ -44,13 +63,19 @@ Op next_op(std::mt19937& rng, lob::OrderId issued) {
     } else {
       op.order.qty = 1 + static_cast<lob::Qty>(rng() % 100);
     }
-    if (rng() % 100 < 3) {
-      op.order.price = rng() % 2 == 0 ? kMin - 1 : kMax + 1;  // out of band
-    } else if (op.order.side == lob::Side::Buy) {
-      op.order.price = kMid - 1 - static_cast<lob::Price>(rng() % 10);  // 90..99
+    if (mix == Mix::Full && rng() % 100 < 10) {
+      op.order.type = lob::OrderType::Market;
+      op.order.tif = lob::Tif::Ioc;
+      op.order.price = kMid;  // ignored by both books
     } else {
-      op.order.price = kMid + 1 + static_cast<lob::Price>(rng() % 10);  // 101..110
-    }
+      op.order.type = lob::OrderType::Limit;
+      op.order.tif = mix == Mix::Full ? pick_tif(rng) : lob::Tif::Gtc;
+      if (rng() % 100 < 3) {
+        op.order.price = rng() % 2 == 0 ? kMin - 1 : kMax + 1;  // out of band
+      } else {
+        op.order.price = pick_price(rng, mix, op.order.side);
+      } 
+    }  
   } else {
     op.is_add = false;
     op.target = 1 + rng() % (issued + 2);  // includes ids that never existed
@@ -62,26 +87,28 @@ std::string describe(std::uint32_t seed, int step, const Op& op) {
   std:: ostringstream os;
   os << "seed " << seed << ", step " << step << ", ";
   if (op.is_add) {
-    os << "add " << (op.order.side == lob::Side::Buy ? "buy" : "sell")
-       << " px " << op.order.price << " qty " << op.order.qty;
+    os << (op.order.type == lob::OrderType::Market ? "market " : "limit ")
+       << (op.order.side == lob::Side::Buy ? "buy" : "sell")
+       << " px " << op.order.price << " qty " << op.order.qty
+       << " tif " << static_cast<int>(op.order.tif);
   } else {
     os << "cancel " << op.target;
   }
   return os.str();
 }
 
-void run_seed(std::uint32_t seed, int ops) {
+void run_seed(std::uint32_t seed, int ops, Mix mix) {
     lob::ReferenceBook ref(kMin, kMax);
     lob::FastBook fast(kMin, kMax, 4096);
     std::mt19937 rng(seed);
     lob::OrderId issued = 0;
     for (int step = 0; step < ops; ++step) {
-      const Op op = next_op(rng, issued);
+      const Op op = next_op(rng, issued, mix);
       Collect expected;
       Collect actual;
       if (op.is_add) {
         ref.submit(op.order, expected);
-        fast.add(op.order, actual);
+        fast.submit(op.order, actual);
         ++issued;
       } else {
         ref.cancel(op.target, expected);
@@ -99,11 +126,25 @@ void run_seed(std::uint32_t seed, int ops) {
     }
 }
 
+// LOB_DIFF_SEEDS overrides the seed count for long local runs (10,000 per WORKLOG S4.4).
+std::uint32_t seed_count(std::uint32_t default_count) {
+  const char* v = std::getenv("LOB_DIFF_SEEDS");
+  return v != nullptr ? static_cast<std::uint32_t>(std::strtoul(v, nullptr, 10)) : default_count;
+}
+
 }  // namespace
 
 TEST(Differential, AddCancel) {
   for (std::uint32_t seed = 1; seed <= 1000; ++seed) {
-    run_seed(seed, 2000);
+    run_seed(seed, 2000, Mix::AddOnly);
+    if (::testing::Test::HasFailure()) break;  // stop at the first failing seed
+  }
+}
+
+TEST(Differential, Match) {
+  const std::uint32_t n = seed_count(1000);
+  for (std::uint32_t seed = 1; seed <= n; ++seed) {
+    run_seed(seed, 2000, Mix::Full);
     if (::testing::Test::HasFailure()) break;  // stop at the first failing seed
   }
 }

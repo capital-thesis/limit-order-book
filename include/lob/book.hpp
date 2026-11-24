@@ -22,8 +22,8 @@ struct FastTotals {
   Qty rejected = 0;
 };
 
-// Fast book. submit() handles market, IOC and GTC limit orders. FOK arrives in S4.3.
-// Matching arrives in phase 5. Capacity must cover the peak number of resting orders.
+// Fast book. submit() handles market, IOC, FOK and GTC limit orders.
+// Modify arrives in phase 5. Capacity must cover the peak number of resting orders.
 class FastBook {
 public:
   FastBook(Price min_price, Price max_price, std::uint32_t capacity)
@@ -50,7 +50,10 @@ public:
       reject_counted(id, o.qty, RejectReason::NoLiquidity, sink);
       return id;
     }
-    assert(o.tif != Tif::Fok && "FOK arrives in S4.3");
+    if (o.tif == Tif::Fok && crossable_qty(buy, market, o.price, o.qty) < o.qty) {
+      reject_counted(id, o.qty, RejectReason::FokUnfillable, sink);
+      return id;
+    }
 
     totals_.submitted += o.qty;
     sink(ev::accepted(id));
@@ -66,7 +69,7 @@ public:
     return id;
   }
 
-  // Phase 3 name, kept so the add/cancel tests and the differential stream atill compile.
+  // Phase 3 name, kept so the add/cancel tests and the differential stream still compile.
   template <class Sink>
   OrderId add(const NewOrder& o, Sink& sink) {
     return submit(o, sink);
@@ -120,6 +123,7 @@ public:
 private:
   PriceLevels& side(bool buy) { return buy ? bids_ : asks_; }
   PriceLevels& opposite(bool buy) { return buy ? asks_ : bids_; }
+  const PriceLevels& opposite(bool buy) const { return buy ? asks_ : bids_; }
   
   template <class Sink>
   void reject_counted(OrderId id, Qty qty, RejectReason r, Sink& sink) {
@@ -128,6 +132,19 @@ private:
     sink(ev::rejected(id, r));
   }
 
+  // Quantity available on the opposite side within the limit, summed over level
+  // aggregates best-first. Stops as soon as cap is reached. Emits nothing.
+  Qty crossable_qty(bool buy, bool market, Price limit, Qty cap) const {
+    const PriceLevels& opp = opposite(buy);
+    Qty total = 0;
+    std::optional<Price> p = opp.best();
+    while (p && total < cap && (market || (buy ? *p <= limit : *p >= limit))) {
+      total += opp.level(*p).total;
+      p = opp.next_worse(*p);
+    }
+    return total;
+  }
+  
   // Walks the opposite side best-first while levels cross. Each trade prints at the
   // maker's price, and a maker's Filled follows its own Trade at once.
   // Returns the quantity left untraded.

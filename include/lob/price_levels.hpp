@@ -88,6 +88,16 @@ public:
     // Keeps the level total equal to the sum of leaves.
     void consume(Price p, Qty amount) noexcept { level(p).total -= amount; }
 
+    // The next occupied level after p, moving away from the best price, or nullopt.
+    std::optional<Price> next_worse(Price p) const noexcept {
+      const std::size_t s = slot_of(p);
+      const std::size_t t = best_is_high_
+          ? (s == 0 ? kNoSlot : bitmap_.prev_set(s - 1))
+          : bitmap_.next_set(s + 1);
+      if (t == kNoSlot) return std::nullopt;
+      return price_of(t);
+    }
+
     std::optional<Price> best() const {
       const std::size_t s =
           best_is_high_ ? bitmap_.find_last() : bitmap_.find_first();
