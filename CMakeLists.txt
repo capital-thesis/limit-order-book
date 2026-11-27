@@ -79,3 +79,7 @@ gtest_discover_tests(book_match_tests)
 add_executable(book_fok_tests tests/book_fok_test.cpp)
 target_link_libraries(book_fok_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
 gtest_discover_tests(book_fok_tests)
+
+add_executable(book_modify_tests tests/book_modify_test.cpp)
+target_link_libraries(book_modify_tests PRIVATE lob_warnings lob_ref GTest::gtest_main)
+gtest_discover_tests(book_modify_tests)

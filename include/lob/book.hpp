@@ -95,6 +95,71 @@ public:
     sink(ev::cancelled(id, CancelReason::UserCancel, leaves));
   }
 
+  // new_total is the TOTAL quantity, not remaining (FIX Cancel/Replace).
+  // Same price and no larger total keeps priority. Any other change re-enters the
+  // order as an aggressor with a new priority sequence (CONTRACTS §4).
+  template <class Sink>
+  void modify(OrderId id, Qty new_total, Price new_price, Sink& sink) {
+    const IdMap::Value* found = index_.find(id);
+    if (found == nullptr) {
+      sink(ev::rejected(id, RejectReason::UnknownOrder));
+      return;
+    }
+    if (new_total <= 0) {
+      sink(ev::rejected(id, RejectReason::InvalidQty));
+      return;
+    }
+    if (!bids_.in_band(new_price)) {
+      sink(ev::rejected(id, RejectReason::OutOfBand));
+      return;
+    }
+    const PoolIndex i = *found;
+    PoolOrder& o = pool_[i];
+    const Qty filled = o.filled;
+    if (new_total <= filled) {
+      sink(ev::rejected(id, RejectReason::QtyNotAboveFilled));
+      return;
+    }
+    const bool buy = o.buy;
+    const Price old_price = o.price;
+    const Qty old_total = o.total;
+
+    if (new_price == old_price && new_total <= old_total) {
+      // Keeps priority: the order stays where it is in its level.
+      const Qty delta = old_total - new_total;
+      if (delta > 0) {
+        side(buy).consume(old_price, delta);
+        o.total = new_total;
+        resting_ -= delta;
+        totals_.reduced += delta;
+      }
+      sink(ev::modified(id, new_price, new_total, new_total - filled));
+      return;
+    }
+
+    // Loses priority: take the order out, apply the change, and re-enter it as an
+    // aggressor. Its id and remaining quantity go through the same path as a new order.
+    const Qty old_leaves = old_total - filled;
+    side(buy).unlink(pool_, old_price, i);
+    index_.erase(id);
+    pool_.release(i);
+    resting_ -= old_leaves;
+    const Qty delta = new_total - old_total;
+    if (delta > 0) {
+      totals_.increased += delta;
+    } else {
+      totals_.reduced -= delta;
+    }
+    const Qty leaves = new_total - filled;
+    sink(ev::modified(id, new_price, new_total, leaves));
+    const Qty left = match(buy, false, new_price, id, leaves, sink);
+    if (left == 0) {
+      sink(ev::filled(id));
+    } else {
+      place(id, buy, new_price, new_total, new_total - left, sink);
+    }
+  }
+
   std::optional<Price> best_bid() const { return bids_.best(); }
   std::optional<Price> best_ask() const { return asks_.best(); }
   Qty resting_qty() const { return resting_; }
